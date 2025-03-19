@@ -30,24 +30,35 @@ import torch
 import torch.distributed as dist
 import tqdm
 from accelerate import PartialState
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-from transformers import AutoConfig, AutoImageProcessor
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from peft import get_peft_model, LoraConfig, PeftModel, prepare_model_for_kbit_training
 
-import wandb
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.processing_prismatic import (
+    PrismaticImageProcessor,
+    PrismaticProcessor,
+)
+from prismatic.models.backbones.llm.prompting import (
+    PurePromptBuilder,
+    VicunaV15ChatPromptBuilder,
+)
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
 
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from torch.utils.tensorboard.writer import SummaryWriter
+from transformers import (
+    AutoConfig,
+    AutoImageProcessor,
+    AutoModelForVision2Seq,
+    AutoProcessor,
+    BitsAndBytesConfig,
+)
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -115,7 +126,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
-    assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
+    assert (
+        torch.cuda.is_available()
+    ), "Fine-tuning assumes at least one GPU is available!"
     distributed_state = PartialState()
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
@@ -144,7 +157,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.use_quantization:
         assert cfg.use_lora, "Quantized training only supported for LoRA fine-tuning!"
         quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
         )
 
     # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
@@ -182,7 +197,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla.print_trainable_parameters()
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
-    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
+    vla = DDP(
+        vla,
+        device_ids=[device_id],
+        find_unused_parameters=True,
+        gradient_as_bucket_view=True,
+    )
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
@@ -210,7 +230,11 @@ def finetune(cfg: FinetuneConfig) -> None:
         action_tokenizer,
         processor.tokenizer,
         image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+        prompt_builder_fn=(
+            PurePromptBuilder
+            if "v01" not in cfg.vla_path
+            else VicunaV15ChatPromptBuilder
+        ),
     )
     vla_dataset = RLDSDataset(
         cfg.data_root_dir,
@@ -227,7 +251,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Create Collator and DataLoader
     collator = PaddedCollatorForActionPrediction(
-        processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
+        processor.tokenizer.model_max_length,
+        processor.tokenizer.pad_token_id,
+        padding_side="right",
     )
     dataloader = DataLoader(
         vla_dataset,
@@ -239,7 +265,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
-        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{exp_id}")
+        tb_writer = SummaryWriter(log_dir=str(cfg.run_root_dir) + "/tb")
+    else:
+        tb_writer = None
 
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
@@ -267,7 +295,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             normalized_loss.backward()
 
             # Compute Accuracy and L1 Loss for Logging
-            action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+            action_logits = output.logits[
+                :, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1
+            ]
             action_preds = action_logits.argmax(dim=2)
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
             mask = action_gt > action_tokenizer.action_token_begin_idx
@@ -278,12 +308,18 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Compute L1 Loss on Predicted (Continuous) Actions
             continuous_actions_pred = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+                action_tokenizer.decode_token_ids_to_actions(
+                    action_preds[mask].cpu().numpy()
+                )
             )
             continuous_actions_gt = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
+                action_tokenizer.decode_token_ids_to_actions(
+                    action_gt[mask].cpu().numpy()
+                )
             )
-            action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+            action_l1_loss = torch.nn.functional.l1_loss(
+                continuous_actions_pred, continuous_actions_gt
+            )
 
             # Store recent train metrics
             recent_losses.append(loss.item())
@@ -297,18 +333,25 @@ def finetune(cfg: FinetuneConfig) -> None:
             #   =>> Equal to current step metrics when not using gradient accumulation
             #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
             smoothened_loss = sum(recent_losses) / len(recent_losses)
-            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+            smoothened_action_accuracy = sum(recent_action_accuracies) / len(
+                recent_action_accuracies
+            )
             smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
             # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
-                wandb.log(
-                    {
-                        "train_loss": smoothened_loss,
-                        "action_accuracy": smoothened_action_accuracy,
-                        "l1_loss": smoothened_l1_loss,
-                    },
-                    step=gradient_step_idx,
+            if (
+                distributed_state.is_main_process
+                and gradient_step_idx % 10 == 0
+                and tb_writer is not None
+            ):
+                tb_writer.add_scalar("train/loss", smoothened_loss, gradient_step_idx)
+                tb_writer.add_scalar(
+                    "train/action_accuracy",
+                    smoothened_action_accuracy,
+                    gradient_step_idx,
+                )
+                tb_writer.add_scalar(
+                    "train/l1_loss", smoothened_l1_loss, gradient_step_idx
                 )
 
             # Optimizer Step
@@ -336,7 +379,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                 #   =>> Note that merging is slow and can be done post-hoc to speed up training
                 if cfg.use_lora:
                     base_vla = AutoModelForVision2Seq.from_pretrained(
-                        cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+                        cfg.vla_path,
+                        torch_dtype=torch.bfloat16,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
                     )
                     merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
                     merged_vla = merged_vla.merge_and_unload()
@@ -345,20 +391,28 @@ def finetune(cfg: FinetuneConfig) -> None:
                             # Overwrite latest checkpoint
                             merged_vla.save_pretrained(run_dir)
 
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
+                            print(
+                                f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}"
+                            )
                         else:
                             # Prepare to save checkpoint in new directory
-                            checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                            checkpoint_dir = Path(
+                                str(run_dir) + f"--{gradient_step_idx}_chkpt"
+                            )
                             os.makedirs(checkpoint_dir, exist_ok=True)
 
                             # Save dataset statistics to new directory
-                            save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
+                            save_dataset_statistics(
+                                vla_dataset.dataset_statistics, checkpoint_dir
+                            )
 
                             # Save processor and model weights to new directory
                             processor.save_pretrained(checkpoint_dir)
                             merged_vla.save_pretrained(checkpoint_dir)
 
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+                            print(
+                                f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}"
+                            )
 
                 # Block on Main Process Checkpointing
                 dist.barrier()
@@ -367,6 +421,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             if gradient_step_idx == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
+
+    if distributed_state.is_main_process and tb_writer is not None:
+        tb_writer.close()
 
 
 if __name__ == "__main__":

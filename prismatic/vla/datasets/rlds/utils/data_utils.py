@@ -13,16 +13,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import dlimp as dl
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
 
 from prismatic.overwatch import initialize_overwatch
+from tqdm import tqdm
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
 
 
 def tree_map(fn: Callable, tree: Dict) -> Dict:
-    return {k: tree_map(fn, v) if isinstance(v, dict) else fn(v) for k, v in tree.items()}
+    return {
+        k: tree_map(fn, v) if isinstance(v, dict) else fn(v) for k, v in tree.items()
+    }
 
 
 def tree_merge(*trees: Dict) -> Dict:
@@ -58,17 +60,23 @@ class NormalizationType(str, Enum):
 
 
 # ruff: noqa: B023
-def normalize_action_and_proprio(traj: Dict, metadata: Dict, normalization_type: NormalizationType):
+def normalize_action_and_proprio(
+    traj: Dict, metadata: Dict, normalization_type: NormalizationType
+):
     """Normalizes the action and proprio fields of a trajectory using the given metadata."""
     keys_to_normalize = {"action": "action", "proprio": "observation/proprio"}
 
     if normalization_type == NormalizationType.NORMAL:
         for key, traj_key in keys_to_normalize.items():
-            mask = metadata[key].get("mask", tf.ones_like(metadata[key]["mean"], dtype=tf.bool))
+            mask = metadata[key].get(
+                "mask", tf.ones_like(metadata[key]["mean"], dtype=tf.bool)
+            )
             traj = dl.transforms.selective_tree_map(
                 traj,
                 match=lambda k, _: k == traj_key,
-                map_fn=lambda x: tf.where(mask, (x - metadata[key]["mean"]) / (metadata[key]["std"] + 1e-8), x),
+                map_fn=lambda x: tf.where(
+                    mask, (x - metadata[key]["mean"]) / (metadata[key]["std"] + 1e-8), x
+                ),
             )
 
         return traj
@@ -81,7 +89,9 @@ def normalize_action_and_proprio(traj: Dict, metadata: Dict, normalization_type:
             elif normalization_type == NormalizationType.BOUNDS_Q99:
                 low = metadata[key]["q01"]
                 high = metadata[key]["q99"]
-            mask = metadata[key].get("mask", tf.ones_like(metadata[key]["min"], dtype=tf.bool))
+            mask = metadata[key].get(
+                "mask", tf.ones_like(metadata[key]["min"], dtype=tf.bool)
+            )
             traj = dl.transforms.selective_tree_map(
                 traj,
                 match=lambda k, _: k == traj_key,
@@ -95,7 +105,9 @@ def normalize_action_and_proprio(traj: Dict, metadata: Dict, normalization_type:
             # Note (Moo Jin): Map unused action dimensions (i.e., dimensions where min == max) to all 0s.
             zeros_mask = metadata[key]["min"] == metadata[key]["max"]
             traj = dl.transforms.selective_tree_map(
-                traj, match=lambda k, _: k == traj_key, map_fn=lambda x: tf.where(zeros_mask, 0.0, x)
+                traj,
+                match=lambda k, _: k == traj_key,
+                map_fn=lambda x: tf.where(zeros_mask, 0.0, x),
             )
 
         return traj
@@ -129,7 +141,11 @@ def binarize_gripper_actions(actions: tf.Tensor) -> tf.Tensor:
     is_open_float = tf.cast(open_mask, tf.float32)
 
     def scan_fn(carry, i):
-        return tf.cond(in_between_mask[i], lambda: tf.cast(carry, tf.float32), lambda: is_open_float[i])
+        return tf.cond(
+            in_between_mask[i],
+            lambda: tf.cast(carry, tf.float32),
+            lambda: is_open_float[i],
+        )
 
     return tf.scan(scan_fn, tf.range(tf.shape(actions)[0]), actions[-1], reverse=True)
 
@@ -149,7 +165,9 @@ def rel2abs_gripper_actions(actions: tf.Tensor) -> tf.Tensor:
     thresholded_actions = tf.where(opening_mask, 1, tf.where(closing_mask, -1, 0))
 
     def scan_fn(carry, i):
-        return tf.cond(thresholded_actions[i] == 0, lambda: carry, lambda: thresholded_actions[i])
+        return tf.cond(
+            thresholded_actions[i] == 0, lambda: carry, lambda: thresholded_actions[i]
+        )
 
     # If no relative grasp, assumes open for whole trajectory
     start = -1 * thresholded_actions[tf.argmax(thresholded_actions != 0, axis=0)]
@@ -165,21 +183,33 @@ def rel2abs_gripper_actions(actions: tf.Tensor) -> tf.Tensor:
 # === Bridge-V2 =>> Dataset-Specific Transform ===
 def relabel_bridge_actions(traj: Dict[str, Any]) -> Dict[str, Any]:
     """Relabels actions to use reached proprioceptive state; discards last timestep (no-action)."""
-    movement_actions = traj["observation"]["state"][1:, :6] - traj["observation"]["state"][:-1, :6]
+    movement_actions = (
+        traj["observation"]["state"][1:, :6] - traj["observation"]["state"][:-1, :6]
+    )
     traj_truncated = tf.nest.map_structure(lambda x: x[:-1], traj)
-    traj_truncated["action"] = tf.concat([movement_actions, traj["action"][:-1, -1:]], axis=1)
+    traj_truncated["action"] = tf.concat(
+        [movement_actions, traj["action"][:-1, -1:]], axis=1
+    )
 
     return traj_truncated
 
 
 # === RLDS Dataset Initialization Utilities ===
-def pprint_data_mixture(dataset_kwargs_list: List[Dict[str, Any]], dataset_weights: List[int]) -> None:
-    print("\n######################################################################################")
-    print(f"# Loading the following {len(dataset_kwargs_list)} datasets (incl. sampling weight):{'': >24} #")
+def pprint_data_mixture(
+    dataset_kwargs_list: List[Dict[str, Any]], dataset_weights: List[int]
+) -> None:
+    print(
+        "\n######################################################################################"
+    )
+    print(
+        f"# Loading the following {len(dataset_kwargs_list)} datasets (incl. sampling weight):{'': >24} #"
+    )
     for dataset_kwargs, weight in zip(dataset_kwargs_list, dataset_weights):
         pad = 80 - len(dataset_kwargs["name"])
         print(f"# {dataset_kwargs['name']}: {weight:=>{pad}f} #")
-    print("######################################################################################\n")
+    print(
+        "######################################################################################\n"
+    )
 
 
 def get_dataset_statistics(
@@ -194,10 +224,14 @@ def get_dataset_statistics(
     Currently, the statistics include the min/max/mean/std of the actions and proprio as well as the number of
     transitions and trajectories in the dataset.
     """
-    unique_hash = hashlib.sha256("".join(hash_dependencies).encode("utf-8"), usedforsecurity=False).hexdigest()
+    unique_hash = hashlib.sha256(
+        "".join(hash_dependencies).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()
 
     # Fallback local path for when data_dir is not writable or not provided
-    local_path = os.path.expanduser(os.path.join("~", ".cache", "orca", f"dataset_statistics_{unique_hash}.json"))
+    local_path = os.path.expanduser(
+        os.path.join("~", ".cache", "orca", f"dataset_statistics_{unique_hash}.json")
+    )
     if save_dir is not None:
         path = tf.io.gfile.join(save_dir, f"dataset_statistics_{unique_hash}.json")
     else:
@@ -220,7 +254,9 @@ def get_dataset_statistics(
         lambda traj: {
             "action": traj["action"],
             "proprio": (
-                traj["observation"]["proprio"] if "proprio" in traj["observation"] else tf.zeros_like(traj["action"])
+                traj["observation"]["proprio"]
+                if "proprio" in traj["observation"]
+                else tf.zeros_like(traj["action"])
             ),
         }
     )
@@ -229,9 +265,14 @@ def get_dataset_statistics(
     if cardinality == tf.data.INFINITE_CARDINALITY:
         raise ValueError("Cannot compute dataset statistics for infinite datasets.")
 
-    overwatch.info("Computing dataset statistics. This may take a bit, but should only need to happen once.")
+    overwatch.info(
+        "Computing dataset statistics. This may take a bit, but should only need to happen once."
+    )
     actions, proprios, num_transitions, num_trajectories = [], [], 0, 0
-    for traj in tqdm(dataset.iterator(), total=cardinality if cardinality != tf.data.UNKNOWN_CARDINALITY else None):
+    for traj in tqdm(
+        dataset.iterator(),
+        total=cardinality if cardinality != tf.data.UNKNOWN_CARDINALITY else None,
+    ):
         actions.append(traj["action"])
         proprios.append(traj["proprio"])
         num_transitions += traj["action"].shape[0]
@@ -260,10 +301,12 @@ def get_dataset_statistics(
     }
 
     try:
-        with tf.io.gfile.GFile(path, "w") as f:
+        with open(path, "w") as f:
             json.dump(metadata, f)
     except tf.errors.PermissionDeniedError:
-        overwatch.warning(f"Could not write dataset statistics to {path}. Writing to {local_path} instead.")
+        overwatch.warning(
+            f"Could not write dataset statistics to {path}. Writing to {local_path} instead."
+        )
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with open(local_path, "w") as f:
             json.dump(metadata, f)
@@ -304,7 +347,9 @@ def allocate_threads(n: Optional[int], weights: np.ndarray):
         return np.array([tf.data.AUTOTUNE] * len(weights))
 
     assert np.all(weights >= 0), "Weights must be non-negative"
-    assert len(weights) <= n, "Number of threads must be at least as large as length of weights"
+    assert (
+        len(weights) <= n
+    ), "Number of threads must be at least as large as length of weights"
     weights = np.array(weights) / np.sum(weights)
 
     allocation = np.zeros_like(weights, dtype=int)
