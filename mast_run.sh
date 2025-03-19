@@ -1,19 +1,23 @@
+# --scheduler_args="forceSingleRegion=False;fbpkg_ids=torchx_conda_mount:stable,manifold.manifoldfs:prod,oil.oilfs:stable"  \
+#--env "DISABLE_OILFS=1;MANIFUSE_BUCKET=xr_core_ai_asl_llm;LD_PRELOAD=/usr/local/fbcode/platform010/lib/libcuda.so:/usr/local/fbcode/platform010/lib/libnvidia-ml.so" \
+
+
 TORCHXCONFIG=~/fbsource/fbcode/scripts/yyshi/.torchxconfig_metaconda \
   torchx run \
-  --scheduler_args="forceSingleRegion=False;fbpkg_ids=torchx_conda_mount:stable,manifold.manifoldfs:prod,oil.oilfs:stable"  \
+  --scheduler_args="forceSingleRegion=False;fbpkg_ids=torchx_conda_mount:stable,manifold.manifoldfs:prod"  \
   fb.conda.torchrun \
   --h grandteton \
   --run_as_root True \
-  --env "DISABLE_OILFS=1;MANIFUSE_BUCKET=xr_core_ai_asl_llm;LD_PRELOAD=/usr/local/fbcode/platform010/lib/libcuda.so:/usr/local/fbcode/platform010/lib/libnvidia-ml.so" \
+  --env "DISABLE_NFS=1;DISABLE_OILFS=1;MANIFOLDFS_BUCKET=xr_core_ai_asl_llm;LD_PRELOAD=/usr/local/fbcode/platform010/lib/libcuda.so:/usr/local/fbcode/platform010/lib/libnvidia-ml.so" \
   --name "vla" \
   -- \
   --no-python --nnodes=1 --nproc-per-node=8 \
   ./run.sh  vla-scripts/finetune.py \
-  --vla_path /mnt/xr_core_ai_asl_llm/tree/vla/models/openvla-7b \
-  --data_root_dir /mnt/xr_core_ai_asl_llm/tree/vla/data/bridge_data  \
+  --vla_path /mnt/mffuse/vla/models/openvla-7b \
+  --data_root_dir /mnt/mffuse/vla/data/bridge_data  \
   --dataset_name bridge_orig \
-  --run_root_dir /mnt/xr_core_ai_asl_llm/tree/vla/experiments/03172025_1127 \
-  --adapter_tmp_dir /mnt/xr_core_ai_asl_llm/tree/vla/experiments/03172025_1127_tmp \
+  --run_root_dir /mnt/mffuse/vla/experiments/03172025_1127 \
+  --adapter_tmp_dir /mnt/mffuse/vla/experiments/03172025_1127_tmp \
   --max_steps 200 \
   --lora_rank 32 \
   --batch_size 4 \

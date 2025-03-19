@@ -301,7 +301,7 @@ def get_dataset_statistics(
     }
 
     try:
-        with open(path, "w") as f:
+        with tf.io.gfile.GFile(path, "w") as f:
             json.dump(metadata, f)
     except tf.errors.PermissionDeniedError:
         overwatch.warning(

@@ -3,7 +3,7 @@
 # edited run.sh script to run mount.sh
 
 if [ "$LOCAL_RANK" = "0" ] && [ -z "$DISABLE_MOUNT" ]; then
-    fbpkg fetch oil.oilfs:stable
+    # fbpkg fetch oil.oilfs:stable
     source /packages/torchx_conda_mount/mount.sh
 fi
 
